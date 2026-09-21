@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "name": "RPi Connect -> iTerm2",
+  "version": "1.0",
+  "description": "Adds Open in iTerm2 button to Connect",
+  "permissions": ["nativeMessaging", "cookies"],
+  "host_permissions": ["https://connect.raspberrypi.com/*"],
+  "background": { "service_worker": "background.js" },
+  "content_scripts": [
+    {
+      "matches": ["https://connect.raspberrypi.com/devices", "https://connect.raspberrypi.com/devices/*"],
+      "js": ["button.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ]
+}

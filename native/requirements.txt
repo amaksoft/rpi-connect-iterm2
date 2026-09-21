@@ -1,0 +1,4 @@
+aiortc>=1.9
+websockets>=12
+keyring>=25
+certifi>=2024
