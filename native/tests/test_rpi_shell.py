@@ -151,6 +151,22 @@ class TestReqErrors(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "network error"):
                 m._req("GET", "https://h/", "a=b")
 
+class TestFriendlyError(unittest.TestCase):
+    def test_maps_known_failures(self):
+        t, h = m.friendly_error(RuntimeError("poll -> 401: session expired, blah"))
+        self.assertEqual(t, "login expired")
+        self.assertIn("reload", h)
+        t, h = m.friendly_error(RuntimeError("DataChannel never opened (60s)"))
+        self.assertIn("TURN", t)
+        t, h = m.friendly_error(RuntimeError("timed out waiting for answer (120s)"))
+        self.assertIn("answer", t)
+        t, h = m.friendly_error(ValueError("bad deviceId"))
+        self.assertEqual(t, "bad input")
+
+    def test_unexpected_names_type(self):
+        t, h = m.friendly_error(KeyError("x"))
+        self.assertIn("KeyError", t)
+
     def test_crlf_in_creds_rejected(self):
         with mock.patch.object(m.urllib.request, "urlopen") as uo:
             with self.assertRaisesRegex(RuntimeError, "CR/LF"):

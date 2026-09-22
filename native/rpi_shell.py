@@ -59,6 +59,23 @@ def applescript_for_command(cmd):
             f"command \"{esc}\"")
 
 _POLL_RE = re.compile(r"^/devices/[\w-]+/connections/[\w-]+/?$")
+def friendly_error(e):
+    """Map an exception to (title, hint) for the crash panel. Traceback goes to the log only."""
+    msg = str(e)
+    if "session expired" in msg or "401" in msg or "403" in msg:
+        return ("login expired", "reload the Connect page in Chrome and click Open in iTerm2 again.")
+    if "DataChannel never opened" in msg or "TURN" in msg:
+        return ("Pi unreachable through TURN relay",
+                "reload the Connect page (fresh TURN credentials) and re-click. "
+                "If it persists, the Pi may be offline or behind a strict firewall.")
+    if "timed out waiting for answer" in msg:
+        return ("Pi didn't answer", "is the Pi online with rpi-connect running? Re-click to retry.")
+    if "stdin is not a TTY" in msg:
+        return ("no terminal attached", "launch this from iTerm2 via the extension button.")
+    if isinstance(e, ValueError):
+        return ("bad input", msg)
+    return (f"unexpected error ({type(e).__name__})", f"{msg} - please report with the log.")
+
 def resolve_poll_url(loc):
     if loc.startswith("http"):
         if not loc.startswith(BASE + "/devices/"):
@@ -204,12 +221,13 @@ async def run_shell(device_id, cookies, csrf, ice_cfg, tmux=False, tmux_session=
     # from scary tracebacks to one-line warnings; real failures still surface
     # via the DataChannel-open timeout below.
     _turn_noise = [0]
+    _NOISY = ("ChannelBind", "TransactionFailed", "send_data", "socket.send", "stun", "turn")
     def _exc_handler(lp, ctx):
-        _msg = str(ctx.get("exception", ""))
-        if "ChannelBind" in _msg or "TransactionFailed" in _msg or "stun" in _msg.lower():
+        _msg = f"{ctx.get('message', '')} {ctx.get('exception', '')}"
+        if any(_k.lower() in _msg.lower() for _k in _NOISY):
             _turn_noise[0] += 1
             if _turn_noise[0] <= 3:
-                print(f"[rpi-shell] TURN hiccup ({_turn_noise[0]}): {type(ctx.get('exception')).__name__} - refreshing creds next try", file=sys.stderr)
+                print(f"[rpi-shell] network hiccup ({_turn_noise[0]}/3 logged, rest silenced)", file=sys.stderr)
             return
         lp.default_exception_handler(ctx)
     try: loop.set_exception_handler(_exc_handler)
@@ -483,13 +501,18 @@ def main():
     logf.write(f"\n=== launch device={device} ===\n"); logf.flush()
     try:
         asyncio.run(run_shell(device, cookies, csrf, ice, tmux, tmux_session))
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        print("\n[rpi-shell] interrupted, goodbye.", file=sys.stderr)
+        sys.exit(130)
     except Exception as e:
-        import traceback; traceback.print_exc(); traceback.print_exc(file=logf); logf.flush()
-        print(f"\n[rpi-shell] CRASH: {e}\nlog: {_log}", file=sys.stderr)
-        if sys.stdin.isatty():
-            print("press ENTER to close...", file=sys.stderr)
-            try: input()
-            except EOFError: pass
+        import traceback; traceback.print_exc(file=logf); logf.flush()
+        _title, _hint = friendly_error(e)
+        print(f"\n[rpi-shell] {_title}\n  -> {_hint}\n  detail: {_log}", file=sys.stderr)
+        try:
+            if sys.stdin.isatty():
+                print("press ENTER to close...", file=sys.stderr)
+                input()
+        except (EOFError, OSError): pass
         sys.exit(1)
 
 if __name__ == "__main__":
