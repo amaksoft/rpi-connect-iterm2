@@ -199,13 +199,36 @@ async def run_shell(device_id, cookies, csrf, ice_cfg, tmux=False, tmux_session=
     validate_device_id(device_id)
     validate_tmux_session(tmux_session)
     from aiortc import RTCPeerConnection, RTCSessionDescription, RTCConfiguration, RTCIceServer
+    loop = asyncio.get_event_loop()
+    # Downgrade aioice TURN retry storms (e.g. ChannelBind 400 on stale creds)
+    # from scary tracebacks to one-line warnings; real failures still surface
+    # via the DataChannel-open timeout below.
+    _turn_noise = [0]
+    def _exc_handler(lp, ctx):
+        _msg = str(ctx.get("exception", ""))
+        if "ChannelBind" in _msg or "TransactionFailed" in _msg or "stun" in _msg.lower():
+            _turn_noise[0] += 1
+            if _turn_noise[0] <= 3:
+                print(f"[rpi-shell] TURN hiccup ({_turn_noise[0]}): {type(ctx.get('exception')).__name__} - refreshing creds next try", file=sys.stderr)
+            return
+        lp.default_exception_handler(ctx)
+    try: loop.set_exception_handler(_exc_handler)
+    except Exception: pass
+    # Page-embedded ICE creds are time-limited; refresh them right before
+    # offering (mirrors the web app's /ice-configuration refresh). Fall back
+    # to embedded on any failure so a refresh outage can't break a good page.
+    try:
+        _st, _, _body = await loop.run_in_executor(None, _req, "GET",
+            f"{BASE}/devices/{device_id}/ice-configuration", cookies, csrf)
+        _fresh = json.loads(_body or "{}")
+        if _fresh.get("iceServers"): ice_cfg = _fresh
+    except Exception as e:
+        print(f"[rpi-shell] ICE refresh failed ({e}), using page config", file=sys.stderr)
     cfg = RTCConfiguration(iceServers=[RTCIceServer(**s) for s in (ice_cfg or {}).get("iceServers", [])])
     pc = RTCPeerConnection(cfg)
     poll_url = None
-    loop = None
     try:
         shell = pc.createDataChannel("shell")
-        loop = asyncio.get_event_loop()
         opened = asyncio.Event()
         resize_chan = {}
         pending_resize = {}
@@ -313,7 +336,10 @@ async def run_shell(device_id, cookies, csrf, ice_cfg, tmux=False, tmux_session=
                 except Exception as e:
                     print(f"[rpi-shell] warning: no SIGWINCH handling ({e})", file=sys.stderr)
             try: await asyncio.wait_for(opened.wait(), 60)
-            except asyncio.TimeoutError: raise RuntimeError("DataChannel never opened (60s)")
+            except asyncio.TimeoutError:
+                raise RuntimeError("DataChannel never opened (60s) - likely TURN rejected stale "
+                    "credentials (see TURN hiccups above). Reload the Connect page and re-click "
+                    "for fresh ICE config.")
             send_resize()
             if tmux and shell.readyState == "open":
                 shell.send(b"export TERM=xterm-256color\n")
